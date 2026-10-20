@@ -112,14 +112,15 @@ def _desempaquetar_bits(datos, cantidad):
     return [(datos[i // 8] >> (i % 8)) & 1 for i in range(cantidad)]
 
 
-class LeerCoils(Peticion):
-    """Función 01: leer 'cantidad' coils desde 'direccion'.
+class LeerBits(Peticion):
+    """Base común de las funciones 01 y 02: leer elementos de 1 bit.
+
+    Las dos tienen la misma trama; solo cambia el código de función
+    (y por tanto la tabla del servidor que se lee).
 
     Petición: dirección (2 B) + cantidad (2 B)
     Respuesta: número de bytes N (1 B) + N bytes con los bits empaquetados
     """
-
-    CODIGO = 0x01
 
     def __init__(self, direccion, cantidad):
         _comprobar_rango("direccion", direccion, 0, 0xFFFF)
@@ -137,6 +138,18 @@ class LeerCoils(Peticion):
             raise ErrorProtocolo(f"numero de bytes {n}, se esperaba "
                                  f"{esperado}")
         return _desempaquetar_bits(datos_respuesta[1:], self.cantidad)
+
+
+class LeerCoils(LeerBits):
+    """Función 01: leer coils (tabla 0x, lectura/escritura)."""
+
+    CODIGO = 0x01
+
+
+class LeerEntradasDiscretas(LeerBits):
+    """Función 02: leer discrete inputs (tabla 1x, solo lectura)."""
+
+    CODIGO = 0x02
 
 
 class LeerRegistros(Peticion):
@@ -291,6 +304,10 @@ class ClienteModbusTCP:
     def leer_coils(self, direccion, cantidad):
         """FC01. Devuelve una lista de 0/1, una posición por coil."""
         return self.ejecutar(LeerCoils(direccion, cantidad))
+
+    def leer_entradas_discretas(self, direccion, cantidad):
+        """FC02. Devuelve una lista de 0/1, una posición por entrada."""
+        return self.ejecutar(LeerEntradasDiscretas(direccion, cantidad))
 
     def leer_holding_registers(self, direccion, cantidad):
         """FC03. Devuelve una lista de enteros sin signo (0..65535)."""
