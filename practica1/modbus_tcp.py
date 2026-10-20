@@ -101,6 +101,44 @@ def _comprobar_rango(nombre, valor, minimo, maximo):
                          f"(se ha recibido {valor!r})")
 
 
+def _desempaquetar_bits(datos, cantidad):
+    """Convierte bytes con bits empaquetados en una lista de 0/1.
+
+    El primer bit va en el bit 0 (el de menos peso) del primer byte, el
+    noveno en el bit 0 del segundo byte, etc.  Ejemplo: 4D 03 con
+    cantidad 10 -> [1,0,1,1,0,0,1,0, 1,1].
+    """
+    # Bit i: byte número i // 8, posición i % 8 dentro de ese byte
+    return [(datos[i // 8] >> (i % 8)) & 1 for i in range(cantidad)]
+
+
+class LeerCoils(Peticion):
+    """Función 01: leer 'cantidad' coils desde 'direccion'.
+
+    Petición: dirección (2 B) + cantidad (2 B)
+    Respuesta: número de bytes N (1 B) + N bytes con los bits empaquetados
+    """
+
+    CODIGO = 0x01
+
+    def __init__(self, direccion, cantidad):
+        _comprobar_rango("direccion", direccion, 0, 0xFFFF)
+        _comprobar_rango("cantidad", cantidad, 1, 2000)
+        self.direccion = direccion
+        self.cantidad = cantidad
+
+    def datos(self):
+        return struct.pack(">HH", self.direccion, self.cantidad)
+
+    def procesar(self, datos_respuesta):
+        n = datos_respuesta[0]
+        esperado = (self.cantidad + 7) // 8  # ceil(cantidad / 8)
+        if n != esperado or len(datos_respuesta) != 1 + n:
+            raise ErrorProtocolo(f"numero de bytes {n}, se esperaba "
+                                 f"{esperado}")
+        return _desempaquetar_bits(datos_respuesta[1:], self.cantidad)
+
+
 class LeerRegistros(Peticion):
     """Base común de las funciones 03 y 04: leer registros de 16 bits.
 
@@ -249,6 +287,10 @@ class ClienteModbusTCP:
         return peticion.procesar(pdu_resp[1:])
 
     # --- atajos ------------------------------------------------------------
+
+    def leer_coils(self, direccion, cantidad):
+        """FC01. Devuelve una lista de 0/1, una posición por coil."""
+        return self.ejecutar(LeerCoils(direccion, cantidad))
 
     def leer_holding_registers(self, direccion, cantidad):
         """FC03. Devuelve una lista de enteros sin signo (0..65535)."""
