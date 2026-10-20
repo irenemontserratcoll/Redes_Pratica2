@@ -5,6 +5,8 @@ Estructura:
     Peticion           -> clase base de todas las funciones Modbus. Cada
                           subclase sabe construir su PDU y procesar la respuesta.
     ClienteModbusTCP   -> abre el socket, envía peticiones y recibe respuestas.
+    ErrorModbus        -> base de los errores: ExcepcionModbus, ErrorTimeout,
+                          ErrorConexion y ErrorProtocolo.
 
 Uso rápido:
     >>> from modbus_tcp import ClienteModbusTCP
@@ -28,6 +30,42 @@ class ErrorModbus(Exception):
 
 class ErrorProtocolo(ErrorModbus):
     """La respuesta recibida no respeta el protocolo (campos incoherentes)."""
+
+
+class ErrorTimeout(ErrorModbus):
+    """El servidor no ha respondido a tiempo (cabecera mal, servidor lento...)."""
+
+
+class ErrorConexion(ErrorModbus):
+    """No se puede conectar, o la conexión TCP se ha roto."""
+
+
+class ExcepcionModbus(ErrorModbus):
+    """El servidor ha respondido con una excepción (función + 0x80, código).
+
+    Atributos:
+        funcion  código de función de la petición rechazada
+        codigo   código de excepción (0x01, 0x02...)
+        nombre   nombre del código según la norma
+    """
+
+    NOMBRES = {
+        0x01: "ILLEGAL FUNCTION",
+        0x02: "ILLEGAL DATA ADDRESS",
+        0x03: "ILLEGAL DATA VALUE",
+        0x04: "SERVER DEVICE FAILURE",
+        0x05: "ACKNOWLEDGE",
+        0x06: "SERVER DEVICE BUSY",
+        0x08: "MEMORY PARITY ERROR",
+        0x0A: "GATEWAY PATH UNAVAILABLE",
+        0x0B: "GATEWAY TARGET DEVICE FAILED TO RESPOND",
+    }
+
+    def __init__(self, funcion, codigo):
+        self.funcion = funcion
+        self.codigo = codigo
+        self.nombre = self.NOMBRES.get(codigo, "DESCONOCIDA")
+        super().__init__(f"0x{codigo:02X} {self.nombre}")
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +315,12 @@ class ClienteModbusTCP:
 
     def conectar(self):
         """Abre la conexión TCP con el servidor."""
-        self._socket = socket.create_connection((self.ip, self.puerto),
-                                                timeout=self.timeout)
+        try:
+            self._socket = socket.create_connection((self.ip, self.puerto),
+                                                    timeout=self.timeout)
+        except OSError as e:  # puerto cerrado, IP inalcanzable...
+            raise ErrorConexion(f"no se puede conectar a "
+                                f"{self.ip}:{self.puerto}: {e}") from e
 
     def cerrar(self):
         """Cierra la conexión (no falla si ya estaba cerrada)."""
@@ -311,7 +353,7 @@ class ClienteModbusTCP:
         while len(datos) < n:
             trozo = self._socket.recv(n - len(datos))
             if not trozo:  # el servidor ha cerrado la conexión
-                raise ErrorProtocolo("el servidor ha cerrado la conexion")
+                raise ErrorConexion("el servidor ha cerrado la conexion")
             datos += trozo
         return datos
 
@@ -319,8 +361,39 @@ class ClienteModbusTCP:
         if self.traza:
             print(f"{prefijo}: {trama.hex(' ').upper()}")
 
+    def _transaccion(self, trama, tid):
+        """Envía la trama y devuelve la PDU de la respuesta.
+
+        Lee la cabecera (7 bytes), después Length - 1 bytes, y comprueba que
+        la respuesta corresponde a la petición enviada.
+        """
+        self._imprimir("TX", trama)
+        self._socket.sendall(trama)
+
+        bruto_cab = self._recibir_exacto(CabeceraMBAP.TAMANO)
+        cab = CabeceraMBAP.desempaquetar(bruto_cab)
+        if cab.length < 2:
+            raise ErrorProtocolo(f"Length imposible: {cab.length}")
+        pdu_resp = self._recibir_exacto(cab.length - 1)
+        self._imprimir("RX", bruto_cab + pdu_resp)
+
+        if cab.transaction_id != tid:
+            raise ErrorProtocolo(f"Transaction ID {cab.transaction_id}, "
+                                 f"se esperaba {tid}")
+        if cab.protocol_id != 0:
+            raise ErrorProtocolo(f"Protocol ID {cab.protocol_id}, "
+                                 f"se esperaba 0")
+        return pdu_resp
+
     def ejecutar(self, peticion):
-        """Envía una petición, espera su respuesta y devuelve el resultado."""
+        """Envía una petición, espera su respuesta y devuelve el resultado.
+
+        Errores que puede lanzar:
+            ExcepcionModbus  el servidor ha rechazado la petición
+            ErrorTimeout     el servidor no ha respondido a tiempo
+            ErrorConexion    no se puede conectar o la conexión se ha roto
+            ErrorProtocolo   la respuesta no tiene sentido
+        """
         if self._socket is None:
             self.conectar()
 
@@ -330,30 +403,34 @@ class ClienteModbusTCP:
         cabecera = CabeceraMBAP(tid, 1 + len(pdu), self.unidad)
         trama = cabecera.empaquetar() + pdu
 
-        # 2. Enviarla
-        self._imprimir("TX", trama)
-        self._socket.sendall(trama)
+        # 2. Enviarla y recibir la respuesta. Si algo falla aquí la conexión
+        # queda en un estado desconocido (podría llegar tarde una respuesta
+        # vieja), así que se cierra; la próxima petición conectará de nuevo.
+        try:
+            pdu_resp = self._transaccion(trama, tid)
+        except socket.timeout as e:
+            self.cerrar()
+            raise ErrorTimeout(f"sin respuesta en {self.timeout} s") from e
+        except OSError as e:
+            self.cerrar()
+            raise ErrorConexion(str(e)) from e
+        except ErrorModbus:
+            self.cerrar()
+            raise
 
-        # 3. Recibir la respuesta: 7 bytes de cabecera y luego Length - 1
-        bruto_cab = self._recibir_exacto(CabeceraMBAP.TAMANO)
-        cab = CabeceraMBAP.desempaquetar(bruto_cab)
-        if cab.length < 2:
-            raise ErrorProtocolo(f"Length imposible: {cab.length}")
-        pdu_resp = self._recibir_exacto(cab.length - 1)
-        self._imprimir("RX", bruto_cab + pdu_resp)
-
-        # 4. Comprobar que la cabecera corresponde a nuestra petición
-        if cab.transaction_id != tid:
-            raise ErrorProtocolo(f"Transaction ID {cab.transaction_id}, "
-                                 f"se esperaba {tid}")
-        if cab.protocol_id != 0:
-            raise ErrorProtocolo(f"Protocol ID {cab.protocol_id}, "
-                                 f"se esperaba 0")
-        if pdu_resp[0] != peticion.CODIGO:
-            raise ErrorProtocolo(f"codigo de funcion 0x{pdu_resp[0]:02X}, "
+        # 3. ¿Excepción? Mismo código con el bit 7 a 1 + código de excepción.
+        # La conexión sigue siendo válida: el cliente puede seguir usándose.
+        funcion = pdu_resp[0]
+        if funcion == peticion.CODIGO | 0x80:
+            if len(pdu_resp) != 2:
+                raise ErrorProtocolo(f"respuesta de excepcion de "
+                                     f"{len(pdu_resp)} bytes, se esperaban 2")
+            raise ExcepcionModbus(peticion.CODIGO, pdu_resp[1])
+        if funcion != peticion.CODIGO:
+            raise ErrorProtocolo(f"codigo de funcion 0x{funcion:02X}, "
                                  f"se esperaba 0x{peticion.CODIGO:02X}")
 
-        # 5. La propia petición interpreta sus datos
+        # 4. La propia petición interpreta sus datos
         return peticion.procesar(pdu_resp[1:])
 
     # --- atajos ------------------------------------------------------------
