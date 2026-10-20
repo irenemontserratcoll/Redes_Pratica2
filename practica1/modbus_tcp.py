@@ -101,14 +101,15 @@ def _comprobar_rango(nombre, valor, minimo, maximo):
                          f"(se ha recibido {valor!r})")
 
 
-class LeerHoldingRegisters(Peticion):
-    """Función 03: leer 'cantidad' holding registers desde 'direccion'.
+class LeerRegistros(Peticion):
+    """Base común de las funciones 03 y 04: leer registros de 16 bits.
+
+    Las dos tienen la misma trama; solo cambia el código de función
+    (y por tanto la tabla del servidor que se lee).
 
     Petición: dirección (2 B) + cantidad (2 B)
     Respuesta: número de bytes N (1 B) + N bytes (2 por registro)
     """
-
-    CODIGO = 0x03
 
     def __init__(self, direccion, cantidad):
         _comprobar_rango("direccion", direccion, 0, 0xFFFF)
@@ -127,6 +128,18 @@ class LeerHoldingRegisters(Peticion):
                                  f"{esperado}")
         # '>' + 'H' repetido 'cantidad' veces: un entero de 16 bits por registro
         return list(struct.unpack(f">{self.cantidad}H", datos_respuesta[1:]))
+
+
+class LeerHoldingRegisters(LeerRegistros):
+    """Función 03: leer holding registers (tabla 4x, lectura/escritura)."""
+
+    CODIGO = 0x03
+
+
+class LeerInputRegisters(LeerRegistros):
+    """Función 04: leer input registers (tabla 3x, solo lectura)."""
+
+    CODIGO = 0x04
 
 
 # ---------------------------------------------------------------------------
@@ -240,3 +253,7 @@ class ClienteModbusTCP:
     def leer_holding_registers(self, direccion, cantidad):
         """FC03. Devuelve una lista de enteros sin signo (0..65535)."""
         return self.ejecutar(LeerHoldingRegisters(direccion, cantidad))
+
+    def leer_input_registers(self, direccion, cantidad):
+        """FC04. Devuelve una lista de enteros sin signo (0..65535)."""
+        return self.ejecutar(LeerInputRegisters(direccion, cantidad))
