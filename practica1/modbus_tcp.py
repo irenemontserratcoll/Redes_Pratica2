@@ -193,6 +193,36 @@ class LeerInputRegisters(LeerRegistros):
     CODIGO = 0x04
 
 
+class EscribirRegistro(Peticion):
+    """Función 06: escribir un valor en un holding register.
+
+    Petición: dirección (2 B) + valor (2 B)
+    Respuesta: eco exacto de la petición
+
+    El valor puede ser sin signo (0..65535) o con signo (-32768..32767);
+    los negativos se envían en complemento a 2 (por ejemplo -5 -> FF FB).
+    """
+
+    CODIGO = 0x06
+
+    def __init__(self, direccion, valor):
+        _comprobar_rango("direccion", direccion, 0, 0xFFFF)
+        _comprobar_rango("valor", valor, -32768, 0xFFFF)
+        self.direccion = direccion
+        # '& 0xFFFF' se queda con los 16 bits de menos peso: a los positivos
+        # no les afecta y a los negativos los pasa a complemento a 2
+        self.valor = valor & 0xFFFF
+
+    def datos(self):
+        return struct.pack(">HH", self.direccion, self.valor)
+
+    def procesar(self, datos_respuesta):
+        if datos_respuesta != self.datos():
+            raise ErrorProtocolo(f"el eco {datos_respuesta.hex(' ')} no "
+                                 f"coincide con la peticion "
+                                 f"{self.datos().hex(' ')}")
+
+
 # ---------------------------------------------------------------------------
 # Cliente
 # ---------------------------------------------------------------------------
@@ -316,3 +346,7 @@ class ClienteModbusTCP:
     def leer_input_registers(self, direccion, cantidad):
         """FC04. Devuelve una lista de enteros sin signo (0..65535)."""
         return self.ejecutar(LeerInputRegisters(direccion, cantidad))
+
+    def escribir_registro(self, direccion, valor):
+        """FC06. Escribe un holding register (admite valores negativos)."""
+        self.ejecutar(EscribirRegistro(direccion, valor))
