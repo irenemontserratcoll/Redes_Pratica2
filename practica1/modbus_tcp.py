@@ -193,25 +193,19 @@ class LeerInputRegisters(LeerRegistros):
     CODIGO = 0x04
 
 
-class EscribirRegistro(Peticion):
-    """Función 06: escribir un valor en un holding register.
+class EscribirSimple(Peticion):
+    """Base común de las funciones 05 y 06: escribir un solo elemento.
 
     Petición: dirección (2 B) + valor (2 B)
     Respuesta: eco exacto de la petición
 
-    El valor puede ser sin signo (0..65535) o con signo (-32768..32767);
-    los negativos se envían en complemento a 2 (por ejemplo -5 -> FF FB).
+    Las subclases solo deciden qué 16 bits van en self.valor.
     """
-
-    CODIGO = 0x06
 
     def __init__(self, direccion, valor):
         _comprobar_rango("direccion", direccion, 0, 0xFFFF)
-        _comprobar_rango("valor", valor, -32768, 0xFFFF)
         self.direccion = direccion
-        # '& 0xFFFF' se queda con los 16 bits de menos peso: a los positivos
-        # no les afecta y a los negativos los pasa a complemento a 2
-        self.valor = valor & 0xFFFF
+        self.valor = valor
 
     def datos(self):
         return struct.pack(">HH", self.direccion, self.valor)
@@ -221,6 +215,39 @@ class EscribirRegistro(Peticion):
             raise ErrorProtocolo(f"el eco {datos_respuesta.hex(' ')} no "
                                  f"coincide con la peticion "
                                  f"{self.datos().hex(' ')}")
+
+
+class EscribirCoil(EscribirSimple):
+    """Función 05: encender o apagar una coil.
+
+    ON no se envía como 1: el valor es FF 00 para ON y 00 00 para OFF
+    (cualquier otro provoca la excepción 0x03 en el servidor).
+    """
+
+    CODIGO = 0x05
+    ON = 0xFF00
+    OFF = 0x0000
+
+    def __init__(self, direccion, valor):
+        # Se acepta cualquier cosa que Python entienda como verdadero/falso:
+        # True/False, 1/0...
+        super().__init__(direccion, self.ON if valor else self.OFF)
+
+
+class EscribirRegistro(EscribirSimple):
+    """Función 06: escribir un valor en un holding register.
+
+    El valor puede ser sin signo (0..65535) o con signo (-32768..32767);
+    los negativos se envían en complemento a 2 (por ejemplo -5 -> FF FB).
+    """
+
+    CODIGO = 0x06
+
+    def __init__(self, direccion, valor):
+        _comprobar_rango("valor", valor, -32768, 0xFFFF)
+        # '& 0xFFFF' se queda con los 16 bits de menos peso: a los positivos
+        # no les afecta y a los negativos los pasa a complemento a 2
+        super().__init__(direccion, valor & 0xFFFF)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +365,10 @@ class ClienteModbusTCP:
     def leer_entradas_discretas(self, direccion, cantidad):
         """FC02. Devuelve una lista de 0/1, una posición por entrada."""
         return self.ejecutar(LeerEntradasDiscretas(direccion, cantidad))
+
+    def escribir_coil(self, direccion, valor):
+        """FC05. Enciende (valor verdadero) o apaga (valor falso) una coil."""
+        self.ejecutar(EscribirCoil(direccion, valor))
 
     def leer_holding_registers(self, direccion, cantidad):
         """FC03. Devuelve una lista de enteros sin signo (0..65535)."""
