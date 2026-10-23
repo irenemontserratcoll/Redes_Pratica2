@@ -150,6 +150,20 @@ def _desempaquetar_bits(datos, cantidad):
     return [(datos[i // 8] >> (i % 8)) & 1 for i in range(cantidad)]
 
 
+def _empaquetar_bits(bits):
+    """Lo contrario de _desempaquetar_bits: lista de 0/1 -> bytes.
+
+    Ejemplo: [1,0,1,1,0,0,1,1, 1,0] -> CD 01.  Los bits sobrantes del
+    último byte quedan a 0.
+    """
+    datos = bytearray((len(bits) + 7) // 8)  # ceil(len / 8) bytes a cero
+    for i, bit in enumerate(bits):
+        if bit:
+            # Bit i: pone a 1 la posición i % 8 del byte número i // 8
+            datos[i // 8] |= 1 << (i % 8)
+    return bytes(datos)
+
+
 class LeerBits(Peticion):
     """Base común de las funciones 01 y 02: leer elementos de 1 bit.
 
@@ -288,38 +302,65 @@ class EscribirRegistro(EscribirSimple):
         super().__init__(direccion, valor & 0xFFFF)
 
 
-class EscribirRegistros(Peticion):
-    """Función 10 (16): escribir varios holding registers seguidos.
+class EscribirMultiple(Peticion):
+    """Base común de las funciones 0F y 10: escribir varios elementos.
 
     Petición: dirección (2 B) + cantidad (2 B) + número de bytes N (1 B)
-              + N bytes (2 por registro, big-endian)
+              + N bytes con los valores
     Respuesta: dirección (2 B) + cantidad (2 B), las de la petición
 
-    Cada valor admite lo mismo que en la 06: 0..65535 o -32768..32767.
+    Las subclases solo deciden cómo se codifican los valores en bytes.
+    """
+
+    def __init__(self, direccion, cantidad, valores_bytes):
+        _comprobar_rango("direccion", direccion, 0, 0xFFFF)
+        self.direccion = direccion
+        self.cantidad = cantidad
+        self.valores_bytes = valores_bytes
+
+    def datos(self):
+        return (struct.pack(">HHB", self.direccion, self.cantidad,
+                            len(self.valores_bytes))
+                + self.valores_bytes)
+
+    def procesar(self, datos_respuesta):
+        esperado = struct.pack(">HH", self.direccion, self.cantidad)
+        if datos_respuesta != esperado:
+            raise ErrorProtocolo(f"la respuesta {datos_respuesta.hex(' ')} "
+                                 f"no confirma direccion y cantidad "
+                                 f"{esperado.hex(' ')}")
+
+
+class EscribirCoils(EscribirMultiple):
+    """Función 0F (15): escribir varias coils seguidas.
+
+    Los valores (lista de 0/1 o True/False) se empaquetan 8 por byte,
+    igual que en la respuesta de la función 01.
+    """
+
+    CODIGO = 0x0F
+
+    def __init__(self, direccion, valores):
+        _comprobar_rango("cantidad de valores", len(valores), 1, 1968)
+        super().__init__(direccion, len(valores), _empaquetar_bits(valores))
+
+
+class EscribirRegistros(EscribirMultiple):
+    """Función 10 (16): escribir varios holding registers seguidos.
+
+    Cada valor ocupa 2 bytes (big-endian) y admite lo mismo que en la 06:
+    0..65535 o -32768..32767.
     """
 
     CODIGO = 0x10
 
     def __init__(self, direccion, valores):
-        _comprobar_rango("direccion", direccion, 0, 0xFFFF)
         _comprobar_rango("cantidad de valores", len(valores), 1, 123)
         for v in valores:
             _comprobar_rango("valor", v, -32768, 0xFFFF)
-        self.direccion = direccion
-        self.valores = [v & 0xFFFF for v in valores]  # complemento a 2
-
-    def datos(self):
-        cantidad = len(self.valores)
-        registros = struct.pack(f">{cantidad}H", *self.valores)
-        return (struct.pack(">HHB", self.direccion, cantidad, len(registros))
-                + registros)
-
-    def procesar(self, datos_respuesta):
-        esperado = struct.pack(">HH", self.direccion, len(self.valores))
-        if datos_respuesta != esperado:
-            raise ErrorProtocolo(f"la respuesta {datos_respuesta.hex(' ')} "
-                                 f"no confirma direccion y cantidad "
-                                 f"{esperado.hex(' ')}")
+        sin_signo = [v & 0xFFFF for v in valores]  # complemento a 2
+        super().__init__(direccion, len(valores),
+                         struct.pack(f">{len(valores)}H", *sin_signo))
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +521,10 @@ class ClienteModbusTCP:
     def escribir_coil(self, direccion, valor):
         """FC05. Enciende (valor verdadero) o apaga (valor falso) una coil."""
         self.ejecutar(EscribirCoil(direccion, valor))
+
+    def escribir_coils(self, direccion, valores):
+        """FC0F. Escribe la lista 'valores' (0/1) a partir de 'direccion'."""
+        self.ejecutar(EscribirCoils(direccion, valores))
 
     def leer_holding_registers(self, direccion, cantidad):
         """FC03. Devuelve una lista de enteros sin signo (0..65535)."""
