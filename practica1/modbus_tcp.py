@@ -150,6 +150,20 @@ def _desempaquetar_bits(datos, cantidad):
     return [(datos[i // 8] >> (i % 8)) & 1 for i in range(cantidad)]
 
 
+def _empaquetar_bits(bits):
+    """Lo contrario de _desempaquetar_bits: lista de 0/1 -> bytes.
+
+    Ejemplo: [1,0,1,1,0,0,1,1, 1,0] -> CD 01.  Los bits sobrantes del
+    último byte quedan a 0.
+    """
+    datos = bytearray((len(bits) + 7) // 8)  # ceil(len / 8) bytes a cero
+    for i, bit in enumerate(bits):
+        if bit:
+            # Bit i: pone a 1 la posición i % 8 del byte número i // 8
+            datos[i // 8] |= 1 << (i % 8)
+    return bytes(datos)
+
+
 class LeerBits(Peticion):
     """Base común de las funciones 01 y 02: leer elementos de 1 bit.
 
@@ -286,6 +300,96 @@ class EscribirRegistro(EscribirSimple):
         # '& 0xFFFF' se queda con los 16 bits de menos peso: a los positivos
         # no les afecta y a los negativos los pasa a complemento a 2
         super().__init__(direccion, valor & 0xFFFF)
+
+
+class EscribirMultiple(Peticion):
+    """Base común de las funciones 0F y 10: escribir varios elementos.
+
+    Petición: dirección (2 B) + cantidad (2 B) + número de bytes N (1 B)
+              + N bytes con los valores
+    Respuesta: dirección (2 B) + cantidad (2 B), las de la petición
+
+    Las subclases solo deciden cómo se codifican los valores en bytes.
+    """
+
+    def __init__(self, direccion, cantidad, valores_bytes):
+        _comprobar_rango("direccion", direccion, 0, 0xFFFF)
+        self.direccion = direccion
+        self.cantidad = cantidad
+        self.valores_bytes = valores_bytes
+
+    def datos(self):
+        return (struct.pack(">HHB", self.direccion, self.cantidad,
+                            len(self.valores_bytes))
+                + self.valores_bytes)
+
+    def procesar(self, datos_respuesta):
+        esperado = struct.pack(">HH", self.direccion, self.cantidad)
+        if datos_respuesta != esperado:
+            raise ErrorProtocolo(f"la respuesta {datos_respuesta.hex(' ')} "
+                                 f"no confirma direccion y cantidad "
+                                 f"{esperado.hex(' ')}")
+
+
+class EscribirCoils(EscribirMultiple):
+    """Función 0F (15): escribir varias coils seguidas.
+
+    Los valores (lista de 0/1 o True/False) se empaquetan 8 por byte,
+    igual que en la respuesta de la función 01.
+    """
+
+    CODIGO = 0x0F
+
+    def __init__(self, direccion, valores):
+        _comprobar_rango("cantidad de valores", len(valores), 1, 1968)
+        super().__init__(direccion, len(valores), _empaquetar_bits(valores))
+
+
+class EscribirRegistros(EscribirMultiple):
+    """Función 10 (16): escribir varios holding registers seguidos.
+
+    Cada valor ocupa 2 bytes (big-endian) y admite lo mismo que en la 06:
+    0..65535 o -32768..32767.
+    """
+
+    CODIGO = 0x10
+
+    def __init__(self, direccion, valores):
+        _comprobar_rango("cantidad de valores", len(valores), 1, 123)
+        for v in valores:
+            _comprobar_rango("valor", v, -32768, 0xFFFF)
+        sin_signo = [v & 0xFFFF for v in valores]  # complemento a 2
+        super().__init__(direccion, len(valores),
+                         struct.pack(f">{len(valores)}H", *sin_signo))
+
+
+class LeerEscribirRegistros(LeerRegistros):
+    """Función 17 (23): escribir un bloque de holding registers y leer otro
+    en la misma transacción.  El servidor escribe primero y lee después.
+
+    Petición: dir. lectura (2 B) + cant. lectura (2 B)
+              + dir. escritura (2 B) + cant. escritura (2 B)
+              + número de bytes N (1 B) + N bytes (2 por registro)
+    Respuesta: número de bytes N (1 B) + N bytes leídos (igual que la 03)
+
+    Se reutilizan dos clases:
+      - LeerRegistros (la madre) valida la parte de lectura y procesa la
+        respuesta, que es idéntica a la de la 03.
+      - EscribirRegistros genera la parte de escritura, que es justo lo que
+        va detrás de la parte de lectura.
+    """
+
+    CODIGO = 0x17
+
+    def __init__(self, direccion_lectura, cantidad_lectura,
+                 direccion_escritura, valores):
+        super().__init__(direccion_lectura, cantidad_lectura)
+        _comprobar_rango("cantidad de valores", len(valores), 1, 121)
+        self.escritura = EscribirRegistros(direccion_escritura, valores)
+
+    def datos(self):
+        # lectura (dirección + cantidad) + escritura (dir + cant + N + valores)
+        return super().datos() + self.escritura.datos()
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +551,10 @@ class ClienteModbusTCP:
         """FC05. Enciende (valor verdadero) o apaga (valor falso) una coil."""
         self.ejecutar(EscribirCoil(direccion, valor))
 
+    def escribir_coils(self, direccion, valores):
+        """FC0F. Escribe la lista 'valores' (0/1) a partir de 'direccion'."""
+        self.ejecutar(EscribirCoils(direccion, valores))
+
     def leer_holding_registers(self, direccion, cantidad):
         """FC03. Devuelve una lista de enteros sin signo (0..65535)."""
         return self.ejecutar(LeerHoldingRegisters(direccion, cantidad))
@@ -458,3 +566,13 @@ class ClienteModbusTCP:
     def escribir_registro(self, direccion, valor):
         """FC06. Escribe un holding register (admite valores negativos)."""
         self.ejecutar(EscribirRegistro(direccion, valor))
+
+    def escribir_registros(self, direccion, valores):
+        """FC10. Escribe la lista 'valores' a partir de 'direccion'."""
+        self.ejecutar(EscribirRegistros(direccion, valores))
+
+    def leer_escribir_registros(self, direccion_lectura, cantidad_lectura,
+                                direccion_escritura, valores):
+        """FC17. Escribe 'valores' y después lee; devuelve lo leído."""
+        return self.ejecutar(LeerEscribirRegistros(
+            direccion_lectura, cantidad_lectura, direccion_escritura, valores))
