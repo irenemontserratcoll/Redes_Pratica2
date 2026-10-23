@@ -363,6 +363,35 @@ class EscribirRegistros(EscribirMultiple):
                          struct.pack(f">{len(valores)}H", *sin_signo))
 
 
+class LeerEscribirRegistros(LeerRegistros):
+    """Función 17 (23): escribir un bloque de holding registers y leer otro
+    en la misma transacción.  El servidor escribe primero y lee después.
+
+    Petición: dir. lectura (2 B) + cant. lectura (2 B)
+              + dir. escritura (2 B) + cant. escritura (2 B)
+              + número de bytes N (1 B) + N bytes (2 por registro)
+    Respuesta: número de bytes N (1 B) + N bytes leídos (igual que la 03)
+
+    Se reutilizan dos clases:
+      - LeerRegistros (la madre) valida la parte de lectura y procesa la
+        respuesta, que es idéntica a la de la 03.
+      - EscribirRegistros genera la parte de escritura, que es justo lo que
+        va detrás de la parte de lectura.
+    """
+
+    CODIGO = 0x17
+
+    def __init__(self, direccion_lectura, cantidad_lectura,
+                 direccion_escritura, valores):
+        super().__init__(direccion_lectura, cantidad_lectura)
+        _comprobar_rango("cantidad de valores", len(valores), 1, 121)
+        self.escritura = EscribirRegistros(direccion_escritura, valores)
+
+    def datos(self):
+        # lectura (dirección + cantidad) + escritura (dir + cant + N + valores)
+        return super().datos() + self.escritura.datos()
+
+
 # ---------------------------------------------------------------------------
 # Cliente
 # ---------------------------------------------------------------------------
@@ -541,3 +570,9 @@ class ClienteModbusTCP:
     def escribir_registros(self, direccion, valores):
         """FC10. Escribe la lista 'valores' a partir de 'direccion'."""
         self.ejecutar(EscribirRegistros(direccion, valores))
+
+    def leer_escribir_registros(self, direccion_lectura, cantidad_lectura,
+                                direccion_escritura, valores):
+        """FC17. Escribe 'valores' y después lee; devuelve lo leído."""
+        return self.ejecutar(LeerEscribirRegistros(
+            direccion_lectura, cantidad_lectura, direccion_escritura, valores))
