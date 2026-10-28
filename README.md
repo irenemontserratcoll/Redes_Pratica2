@@ -11,6 +11,7 @@ Cliente Modbus TCP escrito en Python byte a byte, sin bibliotecas Modbus
 |---|---|
 | `practica1/modbus_tcp.py` | La biblioteca: cabecera MBAP, cliente y una clase por función Modbus |
 | `practica1/modbus_cli.py` | Programa de línea de órdenes que ejecuta una petición con la biblioteca |
+| `ejecutable/` | Ejecutable `practica1_modbus` (abre el simulador y una consola de órdenes) y su README con la demostración |
 | `Practica1_ModbusTCP.pdf` | Guion de la práctica |
 
 La carpeta `practica1` es la entrega.
