@@ -237,6 +237,48 @@ guion:
 El error de protocolo no se puede provocar con el simulador, porque siempre
 responde con tramas correctas.
 
+Ejemplos para comprobar cada caso:
+
+```
+modbus> escribir-coils 19 1 0 1
+OK
+[codigo de salida 0]
+
+modbus> leer-coils 19 3
+19 1
+20 0
+21 1
+[codigo de salida 0]
+
+modbus> escribir-registros 1 10 -5
+OK
+[codigo de salida 0]
+
+modbus> leer-holding 1 2
+1 10 10 0x000A
+2 65531 -5 0xFFFB
+[codigo de salida 0]
+
+modbus> leer-holding 0 126
+ARGUMENTO INVALIDO: cantidad debe estar entre 1 y 125 (se ha recibido 126)
+[codigo de salida 2]
+
+modbus> escribir-coil 5 7
+ARGUMENTO INVALIDO: argument valor: '7' no es un valor de coil (usar 1/0, on/off o true/false)
+[codigo de salida 2]
+
+modbus> leer-holding 9999 2
+EXCEPCION 0x02 ILLEGAL DATA ADDRESS
+[codigo de salida 3]
+
+modbus> --puerto 5999 leer-coils 0 1
+ERROR DE CONEXION: no se puede conectar a 127.0.0.1:5999: [Errno 111] Connection refused
+[codigo de salida 5]
+```
+
+En la lectura de registros se ven las cuatro columnas: el registro 2 contiene
+`FF FB`, que es 65531 sin signo y −5 con signo.
+
 ## Si algo falla
 
 - **"Permission denied" al ejecutar:** falta el permiso de ejecución. Ejecuta
